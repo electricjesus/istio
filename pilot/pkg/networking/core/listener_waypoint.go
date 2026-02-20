@@ -679,6 +679,15 @@ func buildConnectForwarder(push *model.PushContext, proxy *model.Proxy, class is
 	if tunnel {
 		tcpProxy.TunnelingConfig = &tcp.TcpProxy_TunnelingConfig{
 			Hostname: "%DOWNSTREAM_LOCAL_ADDRESS%",
+			HeadersToAdd: []*core.HeaderValueOption{
+				{
+					AppendAction: core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+					Header: &core.HeaderValue{
+						Key:   "forwarded",
+						Value: "%FILTER_STATE(io.istio.forwarded:PLAIN)%",
+					},
+				},
+			},
 		}
 		// Set access logs. These are filtered down to only connection establishment errors, to avoid double logs in most cases.
 		accessLogBuilder.setHboneOriginationAccessLog(push, proxy, tcpProxy, class)
