@@ -37,6 +37,8 @@ const (
 	ChainInpodOutput     = "ISTIO_OUTPUT"
 	ChainInpodPrerouting = "ISTIO_PRERT"
 	ChainHostPostrouting = "ISTIO_POSTRT"
+
+	DSCPMagicMark = 0x17
 )
 
 type IptablesConfigurator struct {
@@ -274,6 +276,13 @@ func (cfg *IptablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 			)
 		}
 	}
+
+	iptablesBuilder.AppendRule(ChainInpodPrerouting, "nat",
+		"-p", "tcp",
+		"-m", "dscp", "--dscp", fmt.Sprintf("%#x", DSCPMagicMark),
+		"-j", "REDIRECT",
+		"--to-port", fmt.Sprint(config.ZtunnelInboundPort),
+	)
 
 	// CLI: -A ISTIO_PRERT -m mark --mark 0x539/0xfff -j CONNMARK --set-xmark 0x111/0xfff
 	//

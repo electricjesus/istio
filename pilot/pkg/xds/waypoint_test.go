@@ -21,6 +21,8 @@ import (
 	udpa "github.com/cncf/xds/go/udpa/type/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	sfsvalue "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
+	sfs "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/set_filter_state/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	upstream "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	. "github.com/onsi/gomega"
@@ -943,6 +945,91 @@ func TestWaypointPeerMetadataFilters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWaypointForwardedHeaderPropagation(t *testing.T) {
+	d, proxy := setupWaypointTest(t,
+		waypointGateway,
+		waypointSvc,
+		waypointInstance,
+		appServiceEntry)
+
+	// Part 1: Verify connect_originate listener injects FORWARDED header on outbound HBONE tunnels.
+	coListener := xdstest.ExtractListener("connect_originate", d.Listeners(proxy))
+	if coListener == nil {
+		t.Fatal("connect_originate listener not found")
+	}
+	if len(coListener.FilterChains) == 0 {
+		t.Fatal("connect_originate listener has no filter chains")
+	}
+	tcpProxy := xdstest.ExtractTCPProxy(t, coListener.FilterChains[0])
+	if tcpProxy == nil {
+		t.Fatal("connect_originate has no TCP proxy")
+	}
+	if tcpProxy.TunnelingConfig == nil {
+		t.Fatal("connect_originate TCP proxy has no TunnelingConfig")
+	}
+
+	// Find the forwarded header in HeadersToAdd.
+	var foundForwardedHeader bool
+	for _, hdr := range tcpProxy.TunnelingConfig.HeadersToAdd {
+		if hdr.GetHeader().GetKey() == "forwarded" {
+			foundForwardedHeader = true
+			assert.Equal(t, hdr.GetHeader().GetValue(), "%FILTER_STATE(io.istio.forwarded:PLAIN)%")
+			break
+		}
+	}
+	if !foundForwardedHeader {
+		t.Fatalf("connect_originate TunnelingConfig missing 'forwarded' header, got headers: %v",
+			tcpProxy.TunnelingConfig.HeadersToAdd)
+	}
+
+	// Part 2: Verify connect_terminate listener's ConnectAuthorityFilter captures FORWARDED into filter state.
+	ctListener := xdstest.ExtractListener("connect_terminate", d.Listeners(proxy))
+	if ctListener == nil {
+		t.Fatal("connect_terminate listener not found")
+	}
+	if len(ctListener.FilterChains) == 0 {
+		t.Fatal("connect_terminate listener has no filter chains")
+	}
+
+	hcmConfig := xdstest.ExtractHTTPConnectionManager(t, ctListener.FilterChains[0])
+	if hcmConfig == nil {
+		t.Fatal("connect_terminate has no HCM")
+	}
+
+	// Find the connect_authority HTTP filter.
+	var connectAuthorityCfg *sfs.Config
+	for _, f := range hcmConfig.HttpFilters {
+		if f.Name == "connect_authority" {
+			connectAuthorityCfg = &sfs.Config{}
+			if err := f.GetTypedConfig().UnmarshalTo(connectAuthorityCfg); err != nil {
+				t.Fatalf("failed to unmarshal connect_authority config: %v", err)
+			}
+			break
+		}
+	}
+	if connectAuthorityCfg == nil {
+		t.Fatal("connect_authority HTTP filter not found in connect_terminate HCM")
+	}
+
+	// Find the io.istio.forwarded filter state entry.
+	var foundForwardedEntry bool
+	for _, entry := range connectAuthorityCfg.OnRequestHeaders {
+		key := entry.GetObjectKey()
+		if key == "io.istio.forwarded" {
+			foundForwardedEntry = true
+			// Must use TRANSITIVE sharing so filter state propagates through internal connections.
+			assert.Equal(t, entry.SharedWithUpstream, sfsvalue.FilterStateValue_TRANSITIVE)
+			// Must capture the FORWARDED request header.
+			inlineStr := entry.GetFormatString().GetTextFormatSource().GetInlineString()
+			assert.Equal(t, inlineStr, "%REQ(FORWARDED)%")
+			break
+		}
+	}
+	if !foundForwardedEntry {
+		t.Fatal("connect_authority filter missing io.istio.forwarded filter state entry")
 	}
 }
 
